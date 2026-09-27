@@ -17,7 +17,7 @@ import { currentUser } from "../middleware/auth";
 function cookieOptions(maxAgeMs: number) {
   return {
     httpOnly: true,
-    sameSite: "lax" as const,
+    sameSite: "none" as const,
     secure: env.FRONTEND_URL.startsWith("https://"),
     path: "/",
     maxAge: maxAgeMs,
