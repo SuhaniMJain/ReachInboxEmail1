@@ -1,0 +1,141 @@
+// Prisma schema for the ReachInbox Email Job Scheduler
+// PostgreSQL is the source of truth for all email state.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum EmailStatus {
+  SCHEDULED
+  SENDING
+  SENT
+  FAILED
+}
+
+enum CampaignStatus {
+  PENDING
+  COMPLETED
+  CANCELLED
+}
+
+model User {
+  id        String   @id @default(cuid())
+  googleId  String   @unique @map("google_id")
+  email     String   @unique
+  name      String
+  avatarUrl String?  @map("avatar_url")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  sessions        Session[]
+  senders         Sender[]
+  campaigns       Campaign[]
+  emails          EmailRecord[]
+  slackConnection SlackConnection?
+
+  @@map("users")
+}
+
+// Server-side auth sessions (survive backend restarts, httpOnly cookie holds the token)
+model Session {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  userId    String   @map("user_id")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+// Slack OAuth connection per user. Access token is encrypted at rest (AES-256-GCM).
+model SlackConnection {
+  id            String   @id @default(cuid())
+  userId        String   @unique @map("user_id")
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  slackUserId   String   @map("slack_user_id")
+  teamId        String   @map("team_id")
+  teamName      String?  @map("team_name")
+  botId         String?  @map("bot_id")
+  scopes        String
+  accessTokenEnc String @map("access_token_enc")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  @@map("slack_connections")
+}
+
+// Multiple senders are supported; every email references the sender it was sent from.
+model Sender {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  fromName  String   @map("from_name")
+  fromEmail String   @map("from_email")
+  isDefault Boolean  @default(false) @map("is_default")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  campaigns Campaign[]
+  emails    EmailRecord[]
+
+  @@index([userId])
+  @@map("senders")
+}
+
+model Campaign {
+  id          String         @id @default(cuid())
+  userId      String         @map("user_id")
+  user        User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  senderId    String         @map("sender_id")
+  sender      Sender         @relation(fields: [senderId], references: [id])
+  subject     String
+  body        String
+  startTime   DateTime       @map("start_time")
+  delayMs     Int            @map("delay_ms")
+  hourlyLimit Int            @map("hourly_limit")
+  totalEmails Int            @map("total_emails")
+  status      CampaignStatus @default(PENDING)
+  createdAt   DateTime       @default(now()) @map("created_at")
+  updatedAt   DateTime       @updatedAt @map("updated_at")
+
+  emails EmailRecord[]
+
+  @@index([userId, createdAt])
+  @@map("campaigns")
+}
+
+// One row per recipient email. jobId is deterministic (= row id) for idempotent re-enqueues.
+model EmailRecord {
+  id          String      @id @default(cuid())
+  campaignId  String      @map("campaign_id")
+  campaign    Campaign    @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  userId      String      @map("user_id")
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  senderId    String      @map("sender_id")
+  sender      Sender      @relation(fields: [senderId], references: [id])
+  jobId       String      @unique
+  recipient   String
+  subject     String
+  body        String
+  scheduledAt DateTime    @map("scheduled_at")
+  sentAt      DateTime?   @map("sent_at")
+  status      EmailStatus @default(SCHEDULED)
+  sequence    Int         // position within the campaign, used to preserve order when rescheduling
+  attempts    Int         @default(0)
+  lastError   String?     @map("last_error")
+  messageId   String?     @map("message_id") // Ethereal/SMTP message id for inspection
+  createdAt   DateTime    @default(now()) @map("created_at")
+  updatedAt   DateTime    @updatedAt @map("updated_at")
+
+  @@index([userId, status, scheduledAt])
+  @@index([campaignId])
+  @@index([status, scheduledAt])
+  @@map("emails")
+}
